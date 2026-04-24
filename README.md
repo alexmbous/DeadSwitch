@@ -741,11 +741,7 @@ Point the mobile app at `http://<your-lan-ip>:3000` (not `localhost`, which the 
 
 ### 11.7 Seed data
 
-```bash
-pnpm --filter @deadswitch/api exec ts-node scripts/seed-dev.ts
-```
-
-Creates a test user, two scenarios with short cadences (30s / 2m) for easy manual testing of the state machine, and one stubbed recipient.
+A dedicated dev seed script is planned but not checked in yet. For now, exercise the flow manually: register through the mobile app or `POST /api/v1/auth/register`, then create a scenario with a short cadence (e.g. 15 min check-in, 1 h grace) from the **New scenario** screen. The dashboard countdown, check-in, arm, and abort flows all drive off real state, so a short-cadence scenario is enough to observe the full ladder.
 
 ---
 
