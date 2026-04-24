@@ -12,7 +12,6 @@ import { ScenariosModule } from './modules/scenarios/scenarios.module';
 import { BundlesModule } from './modules/bundles/bundles.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
-import { VaultModule } from './modules/vault/vault.module';
 import { EscalationModule } from './modules/escalation/escalation.module';
 import { ReleasesModule } from './modules/releases/releases.module';
 import { AuditModule } from './modules/audit/audit.module';
@@ -56,7 +55,6 @@ import { AdminModule } from './modules/admin/admin.module';
     BundlesModule,
     MessagesModule,
     AttachmentsModule,
-    VaultModule,
     EscalationModule,
     ReleasesModule,
     RecipientsModule,

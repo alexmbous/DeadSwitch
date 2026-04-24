@@ -96,7 +96,7 @@ A **Release Bundle** is the payload executed when a scenario fires. A bundle con
 
 - `BundleMessage`s — short text payloads (email / sms / social). Stored as ciphertext; the server envelope-seals the plaintext at ingest and cannot hand it back to anyone but the release worker.
 - `BundleAttachment`s — file attachments (up to 10 MB). Uploaded via multipart, envelope-sealed server-side by the same KMS-backed flow, then written to local blob storage in dev (`apps/api/data/blobs/`) or object storage in prod. The DB row stores only the blob reference, SHA-256 of the ciphertext, size, mime type, and encryption mode.
-- `PrivateVaultItem`s — true end-to-end encrypted items. The client uploads ciphertext + a DEK wrapped by the user's device key; the server cannot unwrap and cannot deliver without a `TrustedContactGrant`. Distinct from the server-sealed path above — see §4.
+- `PrivateVaultItem`s — **reserved, not wired in v1.** The Prisma model and schema exist for true end-to-end encrypted items (client-uploaded ciphertext + a DEK wrapped by the user's device key; server cannot unwrap), but the client-side upload flow and recipient unwrap path are not yet implemented. The HTTP controller and service were removed in the initial cleanup pass; the model survives so a future commit can wire them back in without a schema migration. See §4.1 for the intended threat model.
 
 Each sendable action is **independently idempotent** on `(bundle_id, action_id, recipient_id)` and tracked in the outbox. An action's terminal state is `executed`, `failed_permanent`, `aborted`, `suppressed`, or `sent_after_abort` (recorded when a send completed between an abort request and the worker observing it).
 
@@ -182,14 +182,16 @@ Workers are idempotent on outbox row + attempt. A crash mid-send can cause a dup
 
 DeadSwitch has **two distinct encryption regimes** with different threat models. Confusing them is the single biggest source of bugs in a system like this, so they are kept rigorously separated in code and in this document.
 
-### 4.1 Private vault — server-blind, true client-side encryption
+### 4.1 Private vault — server-blind, true client-side encryption (reserved)
 
-The private vault holds the user's notes, personal instructions, and any content the user wants encrypted end-to-end.
+This regime is designed and specified but **not yet wired in v1** — the HTTP controller, service, and client-side sealing helper were removed from the initial cut because the end-to-end upload flow (blob storage + recipient unwrap) is not complete. The `PrivateVaultItem` table and its FK relationships live in the schema so a future commit can re-introduce the code paths without a migration.
 
-- Master key is derived on device from the user's password via Argon2id (parameters pinned in `packages/shared`).
+The intended model, for reference:
+
+- Master key is derived on device from the user's password via Argon2id (v1 mobile builds ship PBKDF2 only, since the argon2 native module does not bundle under Expo Go — see §11.6 on the native dev-client plan).
 - All vault records are encrypted with XChaCha20-Poly1305 using per-record subkeys derived from the master key.
 - The server stores only ciphertext and KDF parameters. The server cannot decrypt the vault. Password reset without a recovery kit = permanent vault loss; this is intentional.
-- For release delivery, the user can mark vault entries for inclusion as `vault_share` actions. A share is produced client-side by re-encrypting the entry under the recipient's public key before upload.
+- For release delivery, the user can mark vault entries for inclusion under a `TrustedContactGrant`. A share is produced client-side by re-encrypting the DEK under the recipient's public key before upload.
 
 ### 4.2 Action payloads — server-mediated, released under policy
 
