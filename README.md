@@ -714,12 +714,18 @@ The API starts on `:3000` with the dev capability policy (permissive auth, stubb
 
 ### 11.5 Workers
 
-Workers are separate processes. In development, run each in its own terminal:
+Workers are separate processes. Each maps to a BullMQ queue and is started in its own terminal in development:
 
 ```bash
-pnpm --filter @deadswitch/api start:checkins-worker
-pnpm --filter @deadswitch/api start:escalation-worker
-pnpm --filter @deadswitch/api start:release-worker
+# Core release path
+pnpm --filter @deadswitch/api start:checkins-worker         # advances armed → late/escalating based on missed check-ins
+pnpm --filter @deadswitch/api start:escalation-worker       # dispatches escalation notifications (push / SMS / voice)
+pnpm --filter @deadswitch/api start:release-worker          # the only component authorised to execute release actions
+
+# Supporting infrastructure
+pnpm --filter @deadswitch/api start:outbox-relay-worker     # drains the transactional outbox onto BullMQ
+pnpm --filter @deadswitch/api start:containment-watcher-worker  # polls for automated SafetyMode triggers (§6.2)
+pnpm --filter @deadswitch/api start:audit-export-worker     # mirrors AuditEvent rows to the external WORM sink (§7.2)
 ```
 
 The release worker refuses to start unless `DEADSWITCH_ENV=dev` or a real KMS key is configured. This is intentional — do not "work around" it.
