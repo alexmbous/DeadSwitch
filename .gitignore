@@ -1,0 +1,30 @@
+node_modules/
+dist/
+build/
+.expo/
+.expo-shared/
+.expo-internal/
+web-build/
+coverage/
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+.idea/
+.vscode/
+!.vscode/settings.json
+prisma/dev.db
+prisma/*.db-journal
+apps/api/.env
+apps/mobile/.env
+# Local blob storage: holds real encrypted attachment ciphertext from
+# server-sealed action_envelope uploads. Never committed.
+apps/api/data/
+# Emulator / IDE scratch
+*.tsbuildinfo
+.tmp/
+tmp/

@@ -1,0 +1,29 @@
+# Isolated test infrastructure. DO NOT share a Redis / Postgres instance with
+# dev — tests aggressively truncate state.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: deaddrop
+      POSTGRES_PASSWORD: deaddrop
+      POSTGRES_DB: deaddrop_test
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=512m   # fast, throwaway
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deaddrop -d deaddrop_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # no persistence
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

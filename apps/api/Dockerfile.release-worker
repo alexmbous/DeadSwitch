@@ -1,0 +1,19 @@
+# The Release Worker is deployed as a DISTINCT container with a distinct IAM
+# identity. This is the only image granted kms:Decrypt on the action master
+# key. Do not reuse the API image for this role.
+FROM node:20-alpine AS builder
+WORKDIR /repo
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages ./packages
+COPY apps/api ./apps/api
+RUN pnpm install --frozen-lockfile=false
+RUN pnpm --filter @deadswitch/shared build
+RUN pnpm --filter @deadswitch/api prisma:generate
+RUN pnpm --filter @deadswitch/api build
+
+FROM node:20-alpine AS runtime
+WORKDIR /repo/apps/api
+COPY --from=builder /repo /repo
+ENV NODE_ENV=production
+CMD ["node", "dist/workers/release.worker.js"]

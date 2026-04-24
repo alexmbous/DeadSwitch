@@ -1,0 +1,6 @@
+packages:
+  - "apps/api"
+  - "packages/*"
+  # Note: apps/mobile is intentionally excluded from the pnpm workspace —
+  # Expo+Metro doesn't resolve nested pnpm modules. It installs standalone
+  # via npm in apps/mobile.

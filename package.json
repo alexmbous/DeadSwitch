@@ -1,0 +1,22 @@
+{
+  "name": "deadswitch",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/api",
+    "packages/*"
+  ],
+  "scripts": {
+    "api:dev": "pnpm --filter @deadswitch/api start:dev",
+    "api:build": "pnpm --filter @deadswitch/api build",
+    "api:migrate": "pnpm --filter @deadswitch/api prisma migrate dev",
+    "mobile:dev": "pnpm --filter @deadswitch/mobile start",
+    "shared:build": "pnpm --filter @deadswitch/shared build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

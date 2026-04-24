@@ -1,0 +1,723 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Scenario state machine ----------
+// New, explicit, closed set of states. Transitions are enforced via
+// StateMachineService with compare-and-swap.
+enum ScenarioState {
+  draft
+  armed
+  incident_pending
+  escalation_in_progress
+  grace_period
+  release_in_progress
+  released
+  aborted
+  expired
+}
+
+enum UserStatus {
+  active
+  locked
+  closed
+}
+
+enum RecipientKind {
+  email
+  sms
+  secure_link
+  social_handle
+}
+
+enum AccessMethod {
+  direct
+  secure_link
+}
+
+enum BundleVisibility {
+  private
+  public
+}
+
+enum ReleaseStage {
+  on_release
+  on_incident_open
+}
+
+enum Channel {
+  email
+  sms
+  social
+}
+
+enum CheckinResult {
+  ok
+  missed
+}
+
+enum CheckinMethod {
+  app
+  sms_reply
+  call_confirm
+}
+
+enum EscalationStatus {
+  queued
+  sent
+  acked
+  failed
+}
+
+// ---------- Release-action state model ----------
+enum ReleaseActionState {
+  pending
+  sending
+  executed
+  failed_temporary
+  failed_permanent
+  aborted
+  suppressed
+  sent_after_abort
+}
+
+enum ReleaseState {
+  pending
+  executing
+  completed
+  partially_failed
+  aborted
+}
+
+enum AuditActor {
+  user
+  system
+  contact
+  release_worker
+  admin
+}
+
+enum SessionRevokeReason {
+  logout
+  rotated
+  family_compromise
+  admin_revoke
+  expired
+}
+
+enum ContactGrantKind {
+  bundle_vault_unwrap
+  bundle_alert_only
+}
+
+enum KdfMigrationState {
+  idle
+  in_progress
+  completed
+  failed
+}
+
+// ---------- Fail-safe modes ----------
+enum SafetyModeKind {
+  normal
+  degraded
+  release_restricted
+  audit_compromised
+  emergency_freeze
+}
+
+enum CircuitState {
+  closed
+  open
+  half_open
+}
+
+enum AdminRequestKind {
+  enter_mode
+  exit_mode
+  pause_provider
+  resume_provider
+  pause_queue
+  resume_queue
+  reduce_concurrency
+  drain_releases
+  force_unlock_release
+}
+
+enum AdminRequestStatus {
+  pending
+  approved
+  rejected
+  expired
+  executed
+}
+
+// ---------- Safety mode (single row, id='global') ----------
+model SafetyMode {
+  id                String         @id @default("global")
+  mode              SafetyModeKind @default(normal)
+  isolatedProviders String[]       @default([])
+  reason            String?
+  enteredBy         String?
+  enteredAt         DateTime       @default(now())
+  autoEntered       Boolean        @default(false)
+  notes             String?
+}
+
+model SafetyModeTransition {
+  id            String         @id @default(uuid())
+  from          SafetyModeKind
+  to            SafetyModeKind
+  reason        String
+  actor         String
+  autoEntered   Boolean        @default(false)
+  policyVersion String // e.g. "p1:ab12cd34ef56"
+  metadata      Json?
+  occurredAt    DateTime       @default(now())
+
+  @@index([occurredAt])
+}
+
+// ---------- Per-provider circuit breaker state ----------
+// Authoritative state lives in Postgres so restarts don't blow it away.
+// Hot path checks in-memory copy; the CB service writes through on change.
+model ProviderCircuitBreaker {
+  provider          String       @id // "sendgrid" | "twilio-sms" | "twilio-voice" | "kms-decrypt" | "social-*"
+  state             CircuitState @default(closed)
+  failureCount      Int          @default(0)
+  ambiguousCount    Int          @default(0)
+  lastFailureAt     DateTime?
+  lastSuccessAt     DateTime?
+  openedAt          DateTime?
+  nextProbeAt       DateTime?
+  consecutiveProbes Int          @default(0)
+  reason            String?
+}
+
+// ---------- Operator control plane ----------
+// Dual-control requests. One operator creates, another approves.
+model AdminRequest {
+  id            String             @id @default(uuid())
+  kind          AdminRequestKind
+  params        Json
+  requestedBy   String
+  requestedAt   DateTime           @default(now())
+  approvedBy    String?
+  approvedAt    DateTime?
+  rejectedBy    String?
+  rejectedAt    DateTime?
+  executedAt    DateTime?
+  expiresAt     DateTime
+  status        AdminRequestStatus @default(pending)
+  reason        String
+  // Snapshot of system state hash at request creation — see AdminService.
+  // An approval is rejected if the current hash differs: the situation the
+  // approver consented to no longer exists.
+  stateHash     String
+  policyVersion String
+  // Single-use approval nonce. When an approval is processed it is burned;
+  // replay of an older approval is impossible because the request row has
+  // already advanced to a terminal status.
+  approvalNonce String             @unique
+
+  @@index([status, expiresAt])
+}
+
+model User {
+  id                    String            @id @default(uuid())
+  email                 String            @unique
+  emailVerifiedAt       DateTime?
+  phoneE164             String?           @unique
+  phoneVerifiedAt       DateTime?
+  displayName           String
+  passwordHash          String
+  // KDF version used to derive the client-side KEK. Embedded in user record
+  // so the mobile client can use the same params on re-login.
+  kdfVersion            Int               @default(1)
+  kdfMigrationState     KdfMigrationState @default(idle)
+  kdfMigrationFrom      Int?
+  kdfMigrationTo        Int?
+  kdfMigrationStartedAt DateTime?
+  kdfMigrationUpdatedAt DateTime?
+  publicKey             String?
+  recoveryHash          String?
+  cooldownUntil         DateTime?
+  status                UserStatus        @default(active)
+  accountCreatedAt      DateTime          @default(now())
+
+  devices            Device[]
+  sessions           Session[]
+  contacts           TrustedContact[]
+  scenarios          Scenario[]
+  escalationPolicies EscalationPolicy[]
+  auditEvents        AuditEvent[]
+  abortCodes         AbortCode[]
+}
+
+// ---------- Sessions (refresh-token rotation + family) ----------
+model Session {
+  id               String               @id @default(uuid())
+  userId           String
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  familyId         String
+  refreshTokenHash String               @unique
+  parentId         String?
+  deviceId         String?
+  userAgent        String?
+  ipHash           String?
+  createdAt        DateTime             @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  revokedReason    SessionRevokeReason?
+
+  @@index([userId, familyId])
+  @@index([familyId])
+}
+
+model Device {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  devicePublicKey String
+  platform        String
+  pushToken       String?
+  lastSeenAt      DateTime  @default(now())
+  revokedAt       DateTime?
+
+  @@index([userId])
+}
+
+model TrustedContact {
+  id                 String    @id @default(uuid())
+  userId             String
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name               String
+  email              String?
+  phoneE164          String?
+  relationship       String?
+  canRequestPause    Boolean   @default(true)
+  pauseBudgetSeconds Int       @default(86400)
+  pauseUsedSeconds   Int       @default(0)
+  maxSinglePauseSec  Int       @default(43200) // default 12h per single request
+  pauseRequestCount  Int       @default(0)
+  pauseCooldownUntil DateTime?
+  verifiedAt         DateTime?
+  createdAt          DateTime  @default(now())
+
+  grants TrustedContactGrant[]
+
+  @@index([userId])
+}
+
+// ---------- Explicit contact→bundle permissions ----------
+// Trusted contacts get NO access to payloads by default. Access must be
+// granted per-bundle via an explicit record here. Absence of a grant = no
+// access. This enforces the "alerts yes, payloads no" default.
+model TrustedContactGrant {
+  id        String           @id @default(uuid())
+  contactId String
+  contact   TrustedContact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  bundleId  String
+  bundle    ReleaseBundle    @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  kind      ContactGrantKind
+  createdAt DateTime         @default(now())
+
+  @@unique([contactId, bundleId, kind])
+  @@index([bundleId])
+}
+
+model EscalationPolicy {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  stepsJson Json
+  defaults  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  scenarios Scenario[]
+
+  @@index([userId])
+}
+
+model Scenario {
+  id                      String            @id @default(uuid())
+  userId                  String
+  user                    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                    String
+  description             String?
+  state                   ScenarioState     @default(draft)
+  activationAt            DateTime?
+  expectedDurationSeconds Int?
+  mustRenewBy             DateTime?
+  autoExpireAt            DateTime?
+  checkinIntervalSeconds  Int
+  gracePeriodSeconds      Int
+  escalationPolicyId      String?
+  escalationPolicy        EscalationPolicy? @relation(fields: [escalationPolicyId], references: [id])
+  createdAt               DateTime          @default(now())
+  armedAt                 DateTime?
+  abortedAt               DateTime?
+  releasedAt              DateTime?
+  incidentOpenedAt        DateTime?
+
+  bundles            ReleaseBundle[]
+  checkins           Checkin[]
+  escalationAttempts EscalationAttempt[]
+  releases           Release[]
+  abortCodes         AbortCode[]
+
+  @@index([userId, state])
+}
+
+model ReleaseBundle {
+  id           String           @id @default(uuid())
+  scenarioId   String
+  scenario     Scenario         @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  title        String
+  releaseStage ReleaseStage     @default(on_release)
+  visibility   BundleVisibility @default(private)
+  createdAt    DateTime         @default(now())
+
+  recipients  BundleRecipient[]
+  messages    BundleMessage[]
+  attachments BundleAttachment[]
+  vaultItems  PrivateVaultItem[]
+  grants      TrustedContactGrant[]
+
+  @@index([scenarioId])
+}
+
+model BundleRecipient {
+  id                  String        @id @default(uuid())
+  bundleId            String
+  bundle              ReleaseBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  recipientKind       RecipientKind
+  address             String
+  displayName         String?
+  accessMethod        AccessMethod  @default(direct)
+  requireRecipientPin Boolean       @default(false)
+  createdAt           DateTime      @default(now())
+
+  messages         BundleMessage[]
+  accessTokens     RecipientAccessToken[]
+  recipientUnwraps RecipientVaultUnwrap[]
+  attachmentTokens AttachmentAccessToken[]
+
+  @@index([bundleId])
+}
+
+model BundleMessage {
+  id                String           @id @default(uuid())
+  bundleId          String
+  bundle            ReleaseBundle    @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  recipientId       String?
+  recipient         BundleRecipient? @relation(fields: [recipientId], references: [id])
+  messageCiphertext Bytes
+  messageNonce      Bytes
+  messageDekWrapped Bytes
+  channel           Channel
+  socialProviderId  String?
+  subject           String?
+  createdAt         DateTime         @default(now())
+
+  @@index([bundleId])
+}
+
+model BundleAttachment {
+  id              String        @id @default(uuid())
+  bundleId        String
+  bundle          ReleaseBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  blobRef         String
+  ciphertextHash  String // sha256 of ciphertext+tag, hex
+  sizeBytes       Int
+  mimeType        String // server-determined (sniffed/sanitized)
+  clientMimeType  String? // raw client claim (informational)
+  displayFilename String        @default("attachment.bin")
+  encryptionMode  String // private_vault | action_envelope
+  // AAD format version. v1 = "attachment|<bundleId>|<attachmentId>" (legacy).
+  // v2 = "attachment|v2|<bundleId>|<attachmentId>|<mimeType>|<displayFilename>".
+  aadVersion      Int           @default(1)
+  createdAt       DateTime      @default(now())
+
+  accessTokens AttachmentAccessToken[]
+
+  @@index([bundleId])
+}
+
+// ---------- Recipient-specific attachment access tokens ----------
+// Issued AT RELEASE TIME by the release worker. Per (release, recipient,
+// attachment). Plaintext token returned exactly once for embedding in the
+// outbound link; only the HMAC index + argon2id hash are stored. The DEK
+// is re-wrapped under a key derived from the raw token + per-token salt +
+// server pepper (HKDF-SHA256), so the API can decrypt at download time
+// without ever holding KMS-decrypt rights.
+model AttachmentAccessToken {
+  id              String           @id @default(uuid())
+  attachmentId    String
+  attachment      BundleAttachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+  recipientId     String
+  recipient       BundleRecipient  @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  releaseId       String
+  release         Release          @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  releaseActionId String?
+  bundleId        String // denormalized scope guard
+  // Deterministic HMAC-SHA256(serverSecret, rawToken) — indexed lookup.
+  tokenIndex      String           @unique
+  // argon2id of the raw token — verified after lookup.
+  tokenHash       String
+  // Per-token salt + sealed DEK (AES-256-GCM under HKDF-derived KEK).
+  kdfSalt         Bytes
+  sealedDek       Bytes
+  sealedDekNonce  Bytes
+  maxUses         Int              @default(3)
+  uses            Int              @default(0)
+  expiresAt       DateTime
+  firstUsedAt     DateTime?
+  lastUsedAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime         @default(now())
+
+  @@index([attachmentId])
+  @@index([recipientId])
+  @@index([releaseId])
+}
+
+model PrivateVaultItem {
+  id                String        @id @default(uuid())
+  bundleId          String
+  bundle            ReleaseBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  ciphertextBlobRef String
+  wrappedDek        Bytes // wrapped by owner's KEK — server cannot unwrap
+  clientKeyId       String // identifies owner's KEK version
+  nonce             Bytes
+  expiresAt         DateTime?
+  createdAt         DateTime      @default(now())
+
+  recipientUnwraps RecipientVaultUnwrap[]
+  accessTokens     RecipientAccessToken[]
+
+  @@index([bundleId])
+}
+
+// ---------- Recipient-specific sealed DEK ----------
+// Owner, at bundle-creation time, seals a copy of the per-item DEK for each
+// authorized recipient using EITHER a recipient passphrase (PBKDF2/argon2id)
+// OR a recipient public key the owner previously received. Server stores it
+// opaquely; only the recipient can unwrap at access time.
+model RecipientVaultUnwrap {
+  id            String           @id @default(uuid())
+  vaultItemId   String
+  vaultItem     PrivateVaultItem @relation(fields: [vaultItemId], references: [id], onDelete: Cascade)
+  recipientId   String
+  recipient     BundleRecipient  @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  sealingMode   String // passphrase | pubkey
+  sealedDek     Bytes
+  sealingSalt   Bytes? // for passphrase mode
+  sealingParams Json? // kdf params (for passphrase mode)
+  createdAt     DateTime         @default(now())
+
+  @@unique([vaultItemId, recipientId])
+}
+
+// ---------- One-time recipient access tokens ----------
+// Issued AT RELEASE TIME only. Plaintext token is returned once when the
+// secure link is generated for delivery; only the argon2 hash is stored.
+model RecipientAccessToken {
+  id             String           @id @default(uuid())
+  vaultItemId    String
+  vaultItem      PrivateVaultItem @relation(fields: [vaultItemId], references: [id], onDelete: Cascade)
+  recipientId    String
+  recipient      BundleRecipient  @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  // Deterministic HMAC-SHA256(serverSecret, rawToken) — indexed lookup.
+  tokenIndex     String           @unique
+  // argon2id of the raw token — constant-time-ish verification after lookup.
+  tokenHash      String
+  accessCodeHash String?
+  maxUses        Int              @default(3)
+  uses           Int              @default(0)
+  expiresAt      DateTime
+  firstUsedAt    DateTime?
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime         @default(now())
+
+  @@index([vaultItemId])
+  @@index([recipientId])
+}
+
+model Checkin {
+  id          String         @id @default(uuid())
+  scenarioId  String
+  scenario    Scenario       @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  dueAt       DateTime
+  performedAt DateTime?
+  method      CheckinMethod?
+  result      CheckinResult  @default(missed)
+  createdAt   DateTime       @default(now())
+
+  @@unique([scenarioId, dueAt])
+  @@index([scenarioId])
+}
+
+model EscalationAttempt {
+  id          String           @id @default(uuid())
+  scenarioId  String
+  scenario    Scenario         @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  stepIndex   Int
+  channel     String
+  status      EscalationStatus @default(queued)
+  externalRef String?
+  attemptedAt DateTime?
+  ackedAt     DateTime?
+  createdAt   DateTime         @default(now())
+
+  @@index([scenarioId])
+}
+
+model Release {
+  id            String       @id @default(uuid())
+  scenarioId    String
+  scenario      Scenario     @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  state         ReleaseState @default(pending)
+  triggeredAt   DateTime     @default(now())
+  executedAt    DateTime?
+  completedAt   DateTime?
+  triggerReason String
+  canceledAt    DateTime?
+  canceledBy    String?
+  cancelReason  String?
+
+  actions          ReleaseAction[]
+  attachmentTokens AttachmentAccessToken[]
+
+  @@index([scenarioId])
+}
+
+model ReleaseAction {
+  id                String             @id @default(uuid())
+  releaseId         String
+  release           Release            @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  bundleId          String
+  messageId         String?
+  recipientId       String
+  state             ReleaseActionState @default(pending)
+  attempts          Int                @default(0)
+  lastAttemptAt     DateTime?
+  nextAttemptAt     DateTime?
+  lastError         String?
+  provider          String?
+  providerMessageId String?
+  providerStatus    String? // accepted | queued | sent | delivered | failed | undelivered | ambiguous
+  providerStatusAt  DateTime?
+  executedAt        DateTime?
+  createdAt         DateTime           @default(now())
+
+  @@unique([releaseId, bundleId, recipientId, messageId])
+  @@index([releaseId])
+  @@index([state])
+  @@index([providerMessageId])
+}
+
+// ---------- Outbound idempotency ----------
+// Any outbound side-effect (SendGrid send, Twilio SMS/call, social post) must
+// acquire a row here BEFORE calling the provider. Unique constraint prevents
+// duplicates across retries / process crashes / worker redeployment.
+model OutboundDispatch {
+  idempotencyKey    String    @id // e.g. release_action:{id}:{attempt}
+  releaseActionId   String?
+  provider          String
+  providerMessageId String?
+  status            String // reserved | sent | failed
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+  errorMessage      String?
+
+  @@index([releaseActionId])
+}
+
+// ---------- Audit chain ----------
+// Per-scenario chain (fallback chain "user:<uid>" for non-scenario events).
+// Serial number per-scope guarantees gap-free append-only ordering. Prev-
+// hash uses canonical JSON and is computed inside the same transaction
+// that advances the chain.
+model AuditEvent {
+  id              String     @id @default(uuid())
+  userId          String
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // scenarioId is a historical pointer, NOT a live FK. Scenarios can be
+  // deleted (e.g. draft cancellation) while the immutable audit trail
+  // continues to reference them. Queries by scenarioId still work via the
+  // index below.
+  scenarioId      String?
+  chainScope      String // "scenario:<id>" or "user:<id>"
+  seq             Int
+  actor           AuditActor
+  eventType       String
+  payloadRedacted Json
+  prevHash        String
+  hash            String
+  occurredAt      DateTime   @default(now())
+
+  @@unique([chainScope, seq])
+  @@index([userId, occurredAt])
+  @@index([scenarioId, occurredAt])
+}
+
+model RateLimit {
+  key         String
+  bucketStart DateTime
+  count       Int      @default(0)
+
+  @@id([key, bucketStart])
+}
+
+// ---------- Transactional outbox ----------
+// Workers consume this instead of reading queue.add() calls from service
+// methods. Events are written in the same tx as the state changes they
+// describe, so we never drop an enqueue due to a crash between commit and
+// queue.add().
+model OutboxEvent {
+  id          String    @id @default(uuid())
+  queueName   String
+  jobName     String
+  jobId       String // deterministic
+  payload     Json
+  availableAt DateTime  @default(now())
+  attempts    Int       @default(0)
+  lockedUntil DateTime?
+  createdAt   DateTime  @default(now())
+  lastError   String?
+
+  @@unique([queueName, jobId])
+  @@index([availableAt, lockedUntil])
+}
+
+// Audit export checkpoint (section 6).
+model AuditExport {
+  chainScope      String    @id
+  exportedUpToSeq Int       @default(0)
+  lastExportedAt  DateTime?
+  lastSinkObject  String?
+  lastSinkHash    String?
+}
+
+model AbortCode {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scenarioId String
+  scenario   Scenario  @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  codeHash   String
+  usedAt     DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([scenarioId])
+}

@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "DeadSwitch",
+    "slug": "deadswitch",
+    "scheme": "deadswitch",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "app.deadswitch.ios",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Used to unlock DeadSwitch and authorize high-risk actions like arming or disarming scenarios."
+      }
+    },
+    "android": {
+      "package": "app.deadswitch.android"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "DeadSwitch uses Face ID to authorize arming and disarming."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
